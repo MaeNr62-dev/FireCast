@@ -55,9 +55,9 @@ public class CastServerService extends Service {
     }
 
     private void startCastV2Server() {
+    try {
         castV2Server = new CastV2Server(this);
-        try {
-            castV2Server.start();
+        castV2Server.start();
             Log.i(TAG, "Serveur Cast V2 démarré (port 8009)");
         } catch (Exception e) {
             Log.e(TAG, "Erreur Cast V2", e);
