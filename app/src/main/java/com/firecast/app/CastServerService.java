@@ -7,18 +7,14 @@ import android.app.Service;
 import android.content.Intent;
 import android.net.nsd.NsdManager;
 import android.net.nsd.NsdServiceInfo;
+import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.IBinder;
 import android.util.Log;
 import androidx.core.app.NotificationCompat;
 import java.io.IOException;
+import java.util.UUID;
 
-/**
- * Service qui tourne en fond sur le Fire TV :
- * 1. Lance un serveur HTTP sur le port 8008 (protocole DIAL utilisé par Chromecast)
- * 2. Annonce le Fire TV sur le réseau local via mDNS (NSD) pour que
- *    les applis Cast puissent le détecter automatiquement
- */
 public class CastServerService extends Service {
 
     private static final String TAG = "FireCast";
@@ -28,18 +24,32 @@ public class CastServerService extends Service {
     private DialHttpServer dialServer;
     private NsdManager nsdManager;
     private NsdManager.RegistrationListener registrationListener;
+    private WifiManager.MulticastLock multicastLock;
 
     @Override
     public void onCreate() {
         super.onCreate();
         createNotificationChannel();
         startForeground(NOTIF_ID, buildNotification());
+
+        // ESSENTIEL : activer le multicast pour que mDNS fonctionne
+        acquireMulticastLock();
+
         startDialServer();
         registerMdnsService();
     }
 
-    // ── Serveur HTTP DIAL (port 8008) ─────────────────────────────────────────
+    // ── Multicast Lock ────────────────────────────────────────────────────────
+    private void acquireMulticastLock() {
+        WifiManager wifi = (WifiManager) getApplicationContext()
+                .getSystemService(WIFI_SERVICE);
+        multicastLock = wifi.createMulticastLock("FireCastLock");
+        multicastLock.setReferenceCounted(true);
+        multicastLock.acquire();
+        Log.i(TAG, "Multicast lock acquis");
+    }
 
+    // ── Serveur HTTP DIAL (port 8008) ─────────────────────────────────────────
     private void startDialServer() {
         dialServer = new DialHttpServer(this);
         try {
@@ -50,43 +60,43 @@ public class CastServerService extends Service {
         }
     }
 
-    // ── Annonce mDNS (NSD) ────────────────────────────────────────────────────
-
+    // ── Annonce mDNS ──────────────────────────────────────────────────────────
     private void registerMdnsService() {
+        String deviceId = UUID.randomUUID().toString().replace("-", "").substring(0, 12).toUpperCase();
+
         NsdServiceInfo serviceInfo = new NsdServiceInfo();
         serviceInfo.setServiceName("FireCast TV");
         serviceInfo.setServiceType("_googlecast._tcp.");
-        serviceInfo.setPort(8009);
+        serviceInfo.setPort(8008);
 
-        // Attributs Chromecast requis pour la découverte
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
             serviceInfo.setAttribute("fn", "FireCast TV");
-            serviceInfo.setAttribute("md", "FireCast");
+            serviceInfo.setAttribute("md", "FireCast Receiver");
             serviceInfo.setAttribute("ve", "05");
             serviceInfo.setAttribute("ic", "/setup/icon.png");
             serviceInfo.setAttribute("ca", "4101");
             serviceInfo.setAttribute("st", "0");
-            serviceInfo.setAttribute("bs", "FA8FCA5B2C5B");
+            serviceInfo.setAttribute("bs", deviceId);
+            serviceInfo.setAttribute("nf", "1");
+            serviceInfo.setAttribute("rs", "");
         }
 
         registrationListener = new NsdManager.RegistrationListener() {
             @Override public void onRegistrationFailed(NsdServiceInfo s, int e) {
-                Log.e(TAG, "Échec enregistrement mDNS: " + e);
+                Log.e(TAG, "Échec mDNS: " + e);
             }
             @Override public void onUnregistrationFailed(NsdServiceInfo s, int e) {}
             @Override public void onServiceRegistered(NsdServiceInfo s) {
-                Log.i(TAG, "mDNS enregistré : " + s.getServiceName());
+                Log.i(TAG, "✅ mDNS actif : " + s.getServiceName());
             }
             @Override public void onServiceUnregistered(NsdServiceInfo s) {}
         };
 
         nsdManager = (NsdManager) getSystemService(NSD_SERVICE);
-        nsdManager.registerService(serviceInfo,
-                NsdManager.PROTOCOL_DNS_SD, registrationListener);
+        nsdManager.registerService(serviceInfo, NsdManager.PROTOCOL_DNS_SD, registrationListener);
     }
 
     // ── Notification ──────────────────────────────────────────────────────────
-
     private Notification buildNotification() {
         return new NotificationCompat.Builder(this, CHANNEL_ID)
                 .setContentTitle("FireCast actif")
@@ -106,12 +116,11 @@ public class CastServerService extends Service {
     @Override
     public void onDestroy() {
         super.onDestroy();
+        if (multicastLock != null && multicastLock.isHeld()) multicastLock.release();
         if (dialServer != null) dialServer.stop();
-        if (nsdManager != null && registrationListener != null) {
+        if (nsdManager != null && registrationListener != null)
             nsdManager.unregisterService(registrationListener);
-        }
     }
 
-    @Override
-    public IBinder onBind(Intent intent) { return null; }
+    @Override public IBinder onBind(Intent intent) { return null; }
 }
