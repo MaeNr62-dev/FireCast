@@ -1,0 +1,2 @@
+rootProject.name = "FireCast"
+include ':app'
